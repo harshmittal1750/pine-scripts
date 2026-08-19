@@ -1,0 +1,279 @@
+//@version=5
+indicator("Bitcoin Support & Resistance Pro", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// Input parameters
+pivotLookback = input.int(10, "Pivot Lookback", minval=1, maxval=50, group="Detection")
+maxLevels = input.int(5, "Max Levels to Display", minval=1, maxval=20, group="Display")
+zoneWidth = input.float(0.5, "Zone Width %", minval=0.1, maxval=5.0, group="Detection")
+showLabels = input.bool(true, "Show Labels", group="Display")
+showZones = input.bool(true, "Show Zones", group="Display")
+showStrengthScore = input.bool(true, "Show Strength Score", group="Display")
+
+// Advanced filters
+useVolumeFilter = input.bool(true, "Use Volume Filter", group="Advanced Filters")
+volumeThreshold = input.float(1.2, "Volume Threshold (x avg)", minval=0.5, maxval=5.0, group="Advanced Filters")
+useRSIFilter = input.bool(true, "Use RSI Confluence", group="Advanced Filters")
+rsiOverbought = input.int(70, "RSI Overbought", minval=50, maxval=90, group="Advanced Filters")
+rsiOversold = input.int(30, "RSI Oversold", minval=10, maxval=50, group="Advanced Filters")
+useVolumeProfile = input.bool(true, "Use Volume Profile", group="Advanced Filters")
+volumeProfileBars = input.int(100, "Volume Profile Lookback", minval=20, maxval=500, group="Advanced Filters")
+
+// Colors
+resistanceColor = input.color(color.new(color.red, 20), "Resistance Color", group="Colors")
+supportColor = input.color(color.new(color.green, 20), "Support Color", group="Colors")
+resistanceZoneColor = input.color(color.new(color.red, 85), "Resistance Zone Color", group="Colors")
+supportZoneColor = input.color(color.new(color.green, 85), "Support Zone Color", group="Colors")
+strongLevelColor = input.color(color.new(color.orange, 0), "Strong Level Color", group="Colors")
+
+// Calculate RSI
+rsiLength = 14
+rsiValue = ta.rsi(close, rsiLength)
+
+// Calculate volume moving average
+volumeMA = ta.sma(volume, 20)
+
+// Arrays to store support and resistance levels
+var resistanceLevels = array.new_float()
+var supportLevels = array.new_float()
+var resistanceVolumes = array.new_float()
+var supportVolumes = array.new_float()
+
+// Function to check if a level is near an existing level
+isNearLevel(float level, array<float> levels, float threshold) =>
+    result = false
+    if array.size(levels) > 0
+        for i = 0 to array.size(levels) - 1
+            existingLevel = array.get(levels, i)
+            if math.abs(level - existingLevel) / level * 100 < threshold
+                result := true
+                break
+    result
+
+// Function to get volume at a specific bar
+getVolumeAtBar(int barsAgo) =>
+    barsAgo >= 0 and barsAgo <= bar_index ? volume[barsAgo] : 0.0
+
+// Detect pivot highs (potential resistance)
+pivotHigh = ta.pivothigh(high, pivotLookback, pivotLookback)
+if not na(pivotHigh)
+    volumeAtPivot = getVolumeAtBar(pivotLookback)
+    volumeCondition = not useVolumeFilter or volumeAtPivot > volumeMA[pivotLookback] * volumeThreshold
+    rsiAtPivot = rsiValue[pivotLookback]
+    rsiCondition = not useRSIFilter or rsiAtPivot > rsiOverbought
+    
+    if volumeCondition and rsiCondition
+        if not isNearLevel(pivotHigh, resistanceLevels, zoneWidth)
+            array.push(resistanceLevels, pivotHigh)
+            array.push(resistanceVolumes, volumeAtPivot)
+            if array.size(resistanceLevels) > maxLevels * 3
+                array.shift(resistanceLevels)
+                array.shift(resistanceVolumes)
+
+// Detect pivot lows (potential support)
+pivotLow = ta.pivotlow(low, pivotLookback, pivotLookback)
+if not na(pivotLow)
+    volumeAtPivot = getVolumeAtBar(pivotLookback)
+    volumeCondition = not useVolumeFilter or volumeAtPivot > volumeMA[pivotLookback] * volumeThreshold
+    rsiAtPivot = rsiValue[pivotLookback]
+    rsiCondition = not useRSIFilter or rsiAtPivot < rsiOversold
+    
+    if volumeCondition and rsiCondition
+        if not isNearLevel(pivotLow, supportLevels, zoneWidth)
+            array.push(supportLevels, pivotLow)
+            array.push(supportVolumes, volumeAtPivot)
+            if array.size(supportLevels) > maxLevels * 3
+                array.shift(supportLevels)
+                array.shift(supportVolumes)
+
+// Function to calculate volume profile score for a level
+getVolumeProfileScore(float level) =>
+    score = 0.0
+    if useVolumeProfile
+        lookback = math.min(volumeProfileBars, bar_index)
+        totalVolume = 0.0
+        levelVolume = 0.0
+        
+        for i = 1 to lookback
+            totalVolume += volume[i]
+            priceInRange = math.abs(close[i] - level) / level * 100 < zoneWidth
+            if priceInRange
+                levelVolume += volume[i]
+        
+        score := totalVolume > 0 ? (levelVolume / totalVolume) * 100 : 0.0
+    score
+
+// Function to count touches and calculate strength
+calculateStrength(float level, float threshold) =>
+    touches = 0
+    totalVolume = 0.0
+    rsiConfluence = 0
+    lookbackBars = 500
+    
+    for i = 1 to math.min(lookbackBars, bar_index)
+        highTouch = math.abs(high[i] - level) / level * 100 < threshold
+        lowTouch = math.abs(low[i] - level) / level * 100 < threshold
+        
+        if highTouch or lowTouch
+            touches += 1
+            totalVolume += volume[i]
+            
+            if level > close
+                if rsiValue[i] > rsiOverbought
+                    rsiConfluence += 1
+            else
+                if rsiValue[i] < rsiOversold
+                    rsiConfluence += 1
+    
+    avgVolume = touches > 0 ? totalVolume / touches : 0.0
+    volumeScore = avgVolume > volumeMA ? (avgVolume / volumeMA) : 0.5
+    rsiScore = touches > 0 ? (rsiConfluence / touches) : 0.0
+    vpScore = getVolumeProfileScore(level)
+    
+    strengthScore = touches * 10 + volumeScore * 20 + rsiScore * 30 + vpScore * 5
+    [touches, strengthScore, volumeScore, rsiScore, vpScore]
+
+// Sort and filter levels by strength
+var strongResistance = array.new_float()
+var strongSupport = array.new_float()
+var resistanceStrength = array.new_float()
+var supportStrength = array.new_float()
+var resistanceTouches = array.new_int()
+var supportTouches = array.new_int()
+
+if barstate.islast
+    array.clear(strongResistance)
+    array.clear(strongSupport)
+    array.clear(resistanceStrength)
+    array.clear(supportStrength)
+    array.clear(resistanceTouches)
+    array.clear(supportTouches)
+    
+    // Process resistance levels
+    if array.size(resistanceLevels) > 0
+        for i = 0 to array.size(resistanceLevels) - 1
+            level = array.get(resistanceLevels, i)
+            [touches, strength, volScore, rsiScore, vpScore] = calculateStrength(level, zoneWidth)
+            
+            if touches >= 2 and level > close
+                array.push(strongResistance, level)
+                array.push(resistanceStrength, strength)
+                array.push(resistanceTouches, touches)
+    
+    // Process support levels
+    if array.size(supportLevels) > 0
+        for i = 0 to array.size(supportLevels) - 1
+            level = array.get(supportLevels, i)
+            [touches, strength, volScore, rsiScore, vpScore] = calculateStrength(level, zoneWidth)
+            
+            if touches >= 2 and level < close
+                array.push(strongSupport, level)
+                array.push(supportStrength, strength)
+                array.push(supportTouches, touches)
+    
+    // Sort resistance by strength score
+    if array.size(strongResistance) > 1
+        for i = 0 to array.size(strongResistance) - 2
+            for j = 0 to array.size(strongResistance) - 2 - i
+                if array.get(resistanceStrength, j) < array.get(resistanceStrength, j + 1)
+                    tempStrength = array.get(resistanceStrength, j)
+                    array.set(resistanceStrength, j, array.get(resistanceStrength, j + 1))
+                    array.set(resistanceStrength, j + 1, tempStrength)
+                    
+                    tempLevel = array.get(strongResistance, j)
+                    array.set(strongResistance, j, array.get(strongResistance, j + 1))
+                    array.set(strongResistance, j + 1, tempLevel)
+                    
+                    tempTouches = array.get(resistanceTouches, j)
+                    array.set(resistanceTouches, j, array.get(resistanceTouches, j + 1))
+                    array.set(resistanceTouches, j + 1, tempTouches)
+    
+    // Sort support by strength score
+    if array.size(strongSupport) > 1
+        for i = 0 to array.size(strongSupport) - 2
+            for j = 0 to array.size(strongSupport) - 2 - i
+                if array.get(supportStrength, j) < array.get(supportStrength, j + 1)
+                    tempStrength = array.get(supportStrength, j)
+                    array.set(supportStrength, j, array.get(supportStrength, j + 1))
+                    array.set(supportStrength, j + 1, tempStrength)
+                    
+                    tempLevel = array.get(strongSupport, j)
+                    array.set(strongSupport, j, array.get(strongSupport, j + 1))
+                    array.set(strongSupport, j + 1, tempLevel)
+                    
+                    tempTouches = array.get(supportTouches, j)
+                    array.set(supportTouches, j, array.get(supportTouches, j + 1))
+                    array.set(supportTouches, j + 1, tempTouches)
+    
+    // Draw resistance levels
+    numResistance = math.min(maxLevels, array.size(strongResistance))
+    if numResistance > 0
+        for i = 0 to numResistance - 1
+            level = array.get(strongResistance, i)
+            strength = array.get(resistanceStrength, i)
+            touches = array.get(resistanceTouches, i)
+            
+            isStrong = strength > 50
+            lineColor = isStrong ? strongLevelColor : resistanceColor
+            lineWidth = isStrong ? 3 : 2
+            
+            line.new(bar_index - 100, level, bar_index + 20, level, color=lineColor, width=lineWidth, style=line.style_solid, extend=extend.right)
+            
+            if showZones
+                zoneTop = level * (1 + zoneWidth / 100)
+                zoneBottom = level * (1 - zoneWidth / 100)
+                zoneColor = isStrong ? color.new(strongLevelColor, 85) : resistanceZoneColor
+                box.new(bar_index - 100, zoneTop, bar_index + 20, zoneBottom, border_color=color.new(lineColor, 100), bgcolor=zoneColor, extend=extend.right)
+            
+            if showLabels
+                labelText = "R" + str.tostring(i + 1) + " (" + str.tostring(touches) + ")"
+                if showStrengthScore
+                    labelText := labelText + "\n" + str.tostring(math.round(strength, 0))
+                label.new(bar_index, level, labelText, color=lineColor, textcolor=color.white, style=label.style_label_left, size=size.small)
+    
+    // Draw support levels
+    numSupport = math.min(maxLevels, array.size(strongSupport))
+    if numSupport > 0
+        for i = 0 to numSupport - 1
+            level = array.get(strongSupport, i)
+            strength = array.get(supportStrength, i)
+            touches = array.get(supportTouches, i)
+            
+            isStrong = strength > 50
+            lineColor = isStrong ? strongLevelColor : supportColor
+            lineWidth = isStrong ? 3 : 2
+            
+            line.new(bar_index - 100, level, bar_index + 20, level, color=lineColor, width=lineWidth, style=line.style_solid, extend=extend.right)
+            
+            if showZones
+                zoneTop = level * (1 + zoneWidth / 100)
+                zoneBottom = level * (1 - zoneWidth / 100)
+                zoneColor = isStrong ? color.new(strongLevelColor, 85) : supportZoneColor
+                box.new(bar_index - 100, zoneTop, bar_index + 20, zoneBottom, border_color=color.new(lineColor, 100), bgcolor=zoneColor, extend=extend.right)
+            
+            if showLabels
+                labelText = "S" + str.tostring(i + 1) + " (" + str.tostring(touches) + ")"
+                if showStrengthScore
+                    labelText := labelText + "\n" + str.tostring(math.round(strength, 0))
+                label.new(bar_index, level, labelText, color=lineColor, textcolor=color.white, style=label.style_label_left, size=size.small)
+
+// Plot current price and RSI reference
+plot(close, "Current Price", color=color.new(color.blue, 70), linewidth=1, style=plot.style_circles)
+
+// Display enhanced info table
+var infoTable = table.new(position.top_right, 2, 6, border_width=1)
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Metric", bgcolor=color.gray, text_color=color.white)
+    table.cell(infoTable, 1, 0, "Value", bgcolor=color.gray, text_color=color.white)
+    table.cell(infoTable, 0, 1, "Resistance", bgcolor=resistanceColor, text_color=color.white)
+    table.cell(infoTable, 1, 1, str.tostring(math.min(maxLevels, array.size(strongResistance))), bgcolor=color.white)
+    table.cell(infoTable, 0, 2, "Support", bgcolor=supportColor, text_color=color.white)
+    table.cell(infoTable, 1, 2, str.tostring(math.min(maxLevels, array.size(strongSupport))), bgcolor=color.white)
+    table.cell(infoTable, 0, 3, "Current Price", bgcolor=color.blue, text_color=color.white)
+    table.cell(infoTable, 1, 3, str.tostring(close, format.mintick), bgcolor=color.white)
+    table.cell(infoTable, 0, 4, "RSI", bgcolor=color.purple, text_color=color.white)
+    rsiColor = rsiValue > rsiOverbought ? color.red : rsiValue < rsiOversold ? color.green : color.gray
+    table.cell(infoTable, 1, 4, str.tostring(math.round(rsiValue, 2)), bgcolor=rsiColor, text_color=color.white)
+    table.cell(infoTable, 0, 5, "Volume vs Avg", bgcolor=color.orange, text_color=color.white)
+    volRatio = volume / volumeMA
+    volColor = volRatio > volumeThreshold ? color.green : color.gray
+    table.cell(infoTable, 1, 5, str.tostring(math.round(volRatio, 2)) + "x", bgcolor=volColor, text_color=color.white)
